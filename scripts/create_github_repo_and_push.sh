@@ -24,16 +24,10 @@ else
   PRIVATE_JSON=true
 fi
 
-payload=$(python3 - <<PY
-import json
-print(json.dumps({
-  "name": "${REPO_NAME}",
-  "private": ${PRIVATE_JSON},
-  "auto_init": False,
-  "description": "Analysis of Lance namespace read path and write_fragments flow"
-}))
-PY
-)
+payload=$(printf '{"name":"%s","private":%s,"auto_init":false,"description":"%s"}' \
+  "$REPO_NAME" \
+  "$PRIVATE_JSON" \
+  "Analysis of Lance namespace read path and write_fragments flow")
 
 curl -fsS \
   -X POST \
