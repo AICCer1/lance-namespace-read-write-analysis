@@ -5,6 +5,8 @@
 - `pylance` / `lance`：`v6.0.0`
 - `lance-namespace`：`v0.7.6`
 
+> 如果你这次主要关心的是 `managed_versioning`：什么时候生效、怎么传递、写路径怎么用，直接看 `docs/managed-versioning-how-it-works.md`。
+
 ---
 
 ## 1. 先直接回答：commit 的时候冲突是由 namespace 处理的吗？
