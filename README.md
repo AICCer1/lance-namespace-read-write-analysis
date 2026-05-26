@@ -1,70 +1,96 @@
-# Lance Namespace Read / Write Fragments Analysis
+# Lance Namespace 读表、分布式写与 Commit 冲突分析
 
-A focused analysis of how `namespace` is used in:
+这个仓库聚焦回答 3 个问题：
 
-- reading a Lance table via `lance.dataset(...)`
-- low-level distributed writes via `lance.fragment.write_fragments(...)`
+1. `read lance` 表时，`namespace` 到底怎么参与
+2. `write_fragments(...)` 这种低层写接口，怎么和 `namespace` 对接
+3. `commit` 时的冲突，究竟是 `namespace` 处理，还是 Lance 自己处理
 
-Validated against:
+分析基于以下固定版本：
 
-- `pylance` **v6.0.0**
-- `lance-namespace` **v0.7.6**
+- `pylance` / `lance`：`v6.0.0`
+- `lance-namespace`：`v0.7.6`
 
-## What is in this repo
+## 仓库内容
 
-- `docs/namespace-read-write-fragments.md` — main analysis document
-- `examples/read_with_namespace.py` — minimal read example
-- `examples/distributed_write_with_namespace.py` — minimal distributed-write pattern
+- `docs/namespace-read-write-fragments.md`：主分析文档
+- `examples/read_with_namespace.py`：通过 `namespace` 读表的最小示例
+- `examples/distributed_write_with_namespace.py`：`CN 规划 -> 多个 DN 写 fragment -> CN commit` 的简化示例
 
-## Core takeaway
+## 先给结论
 
-`namespace` plays two different roles:
+### 1. 读表时
 
-1. **Read path**: `namespace` is a **table locator + storage-options provider**.
-2. **write_fragments path**: `namespace` is **not the table locator by itself**; you still need a concrete `table_uri`, while `namespace` mainly helps with **credential refresh / version-management context**.
+`namespace` 主要负责：
 
-## Upstream source roots analyzed
+- 把 `table_id` 解析成真实 `table_uri` / `location`
+- 返回 `storage_options`
+- 告诉 Lance 是否启用 `managed_versioning`
+
+也就是说，读路径里 `namespace` 是：
+
+- 表定位器
+- 存储配置提供方
+- 版本管理策略提供方
+
+### 2. `write_fragments(...)` 时
+
+`write_fragments(...)` 不是“只给 `table_id` 就能自动找到表”的高层接口。
+
+你仍然需要先拿到真实的 `table_uri`，通常流程是：
+
+1. `declare_table(...)` 或 `describe_table(...)`
+2. 从返回里拿到 `location`
+3. 把这个 `location` 当成 `table_uri`
+4. 再调用 `write_fragments(...)`
+
+所以 `write_fragments(...)` 这条路里，`namespace` 主要不是负责“自动找表”，而是负责：
+
+- 提供表上下文
+- 提供存储参数
+- 提供 credential refresh / versioning 上下文
+
+### 3. commit 冲突到底谁处理
+
+这里要分两层看：
+
+- **如果 `managed_versioning=True`**：
+  - **表版本发布冲突** 主要走 `namespace` 的 table version API
+  - 也就是 `create_table_version` / `describe_table_version` / `list_table_versions` 这套语义
+- **如果 `managed_versioning` 没开**：
+  - 冲突处理走 **Lance 原生 commit 机制**
+  - 不由 `namespace` 接管版本提交
+
+所以更准确的说法不是“commit 冲突都由 namespace 处理”，而是：
+
+> **当 namespace 宣告自己管理版本时，commit 阶段的版本发布冲突主要由 namespace 这一层处理；否则仍由 Lance 原生提交层处理。**
+
+## 这个仓库里的分布式写示例代表什么
+
+`examples/distributed_write_with_namespace.py` 不是“真实多机部署”，但它在语义上就是：
+
+- `CN`：先通过 `namespace` 拿到 `table_uri`
+- `DN`：各自调用 `write_fragments(...)` 写出 fragment
+- `CN`：收集 fragment，最后统一 `commit`
+
+所以它可以看成：
+
+> **带 namespace 感知的分布式写协议最小闭环示例**
+
+而不是完整的生产级分布式运行时。
+
+## 上游源码根目录
 
 - `../_lance_src_v6.0.0`
 - `../_lance_namespace_src_v0.7.6`
 
-## Quick summary
+## Mermaid 说明
 
-### Read path
+这次我把图改成了 **GitHub 更稳的 Mermaid 写法**，做了这些收敛：
 
-```python
-import lance
-from lance_namespace import connect
+- 节点里不再塞太长的函数签名
+- 尽量避免括号、逗号、斜杠混在节点文本里
+- 改成短中文标签
+- 复杂说明放到图外正文里，不挤进节点里
 
-ns = connect("dir", {"root": "memory://demo"})
-ds = lance.dataset(namespace_client=ns, table_id=["workspace", "table"])
-```
-
-Internally, `lance.dataset(...)` uses `namespace.describe_table(...)` to resolve:
-
-- table `location`
-- `storage_options`
-- `managed_versioning`
-
-### `write_fragments` path
-
-```python
-from lance.fragment import write_fragments
-from lance_namespace import DeclareTableRequest
-
-resp = ns.declare_table(DeclareTableRequest(id=table_id, location=None))
-table_uri = resp.location
-
-fragments = write_fragments(
-    data,
-    table_uri,
-    storage_options=merged_options,
-    namespace_client=ns,
-    table_id=table_id,
-)
-```
-
-Notice the difference:
-
-- `write_dataset(...)` can resolve the table URI from namespace for you.
-- `write_fragments(...)` cannot; you must provide `table_uri` yourself.
+之前 GitHub 没渲染出来，大概率就是 Mermaid 解析器对复杂节点文本比较挑。

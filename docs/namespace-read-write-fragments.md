@@ -1,412 +1,510 @@
-# How Namespace Is Used When Reading Lance Tables and Writing Fragments
+# Lance Namespace 在读表、分布式写和 Commit 冲突中的作用
 
-## Versions analyzed
+## 版本范围
 
-- `pylance` / `lance` source: `v6.0.0`
-- `lance-namespace` source: `v0.7.6`
-
----
-
-## 1. Big picture
-
-`lance-namespace` itself is intentionally thin.
-
-It mainly provides:
-
-- the `LanceNamespace` abstract interface
-- the `connect()` factory
-- the plugin registry (`register_namespace_impl`)
-- shared request / response models
-- shared error types
-
-The actual built-in implementations used by Python live in `pylance`:
-
-- `lance.namespace.DirectoryNamespace`
-- `lance.namespace.RestNamespace`
-
-### Native implementation mapping
-
-`lance-namespace` hardcodes these aliases:
-
-- `"dir" -> "lance.namespace.DirectoryNamespace"`
-- `"rest" -> "lance.namespace.RestNamespace"`
-
-Source:
-
-- `_lance_namespace_src_v0.7.6/python/lance_namespace/lance_namespace/__init__.py#L1086-L1173`
+- `pylance` / `lance`：`v6.0.0`
+- `lance-namespace`：`v0.7.6`
 
 ---
 
-## 2. Read path: how `namespace` is used by `lance.dataset(...)`
+## 1. 先直接回答：commit 的时候冲突是由 namespace 处理的吗？
 
-### Public API shape
+**答案：不是一刀切地“都由 namespace 处理”，而是要看 `managed_versioning`。**
+
+更准确地说：
+
+### 情况 A：`managed_versioning=True`
+
+这时 `namespace` 不只是“找表”和“发 credential”。
+
+它还会接管 **表版本发布** 这件事。也就是说，commit 到最后真正“把新版本登记为最新版本”的阶段，会走 namespace 的 table version API。
+
+这时 commit 冲突的核心语义更接近：
+
+- 目标版本是否已经存在
+- 当前要发布的 manifest 是否还能合法注册成这个版本
+- 并发版本发布是否发生冲突
+
+如果冲突，namespace 会返回冲突错误，Lance 再把这个冲突向上抛出。
+
+### 情况 B：`managed_versioning` 没开或为 `False`
+
+这时 `namespace` 不负责版本发布。
+
+commit 冲突还是走 Lance 原生的提交层：
+
+- manifest 发布
+- 版本号推进
+- 原生 commit handler / object store / 外部提交后端
+
+所以这里的关键判断不是“有没有传 `namespace_client`”，而是：
+
+> **namespace 是否明确声明自己管理 table version。**
+
+---
+
+## 2. 这件事在源码里是怎么落下来的
+
+### 2.1 读表入口会先问 namespace
+
+当你走：
 
 ```python
-import lance
-
-# Either provide uri...
-ds = lance.dataset("s3://bucket/table.lance")
-
-# ...or provide namespace_client + table_id
-nds = lance.dataset(
-    namespace_client=ns,
-    table_id=["workspace", "table"],
-)
+lance.dataset(namespace_client=ns, table_id=table_id)
 ```
 
-### Key rule
+内部会先做 `describe_table(...)`，拿到：
 
-When using namespace-based reads:
+- `location`
+- `storage_options`
+- `managed_versioning`
 
-- provide `namespace_client`
-- provide `table_id`
-- **do not** provide `uri`
+然后再构建 dataset。
 
-Source:
+如果 `managed_versioning=True`，Rust 侧会给这个 dataset builder 安装 **external manifest commit handler**，也就是后续版本管理会走 namespace 对应的 external manifest store 语义。
 
-- `_lance_src_v6.0.0/python/python/lance/__init__.py#L90-L239`
+---
 
-### Internal read flow
+### 2.2 `managed_versioning=True` 时，读和写都会改走 namespace 版本接口
+
+从上游测试能直接看到这件事：
+
+- 打开 latest version 时，会调用 `list_table_versions`
+- 打开指定 version 时，会调用 `describe_table_version`
+- create / append 提交时，会调用 `create_table_version`
+
+这说明：
+
+> 只要 namespace 宣告自己管理版本，Lance 就不再单纯依赖原生的本地 version 发现逻辑，而是把“版本视图”交给 namespace。
+
+---
+
+### 2.3 `create_table_version` 冲突会直接失败
+
+上游 `DirectoryNamespace` 的测试里有明确语义：
+
+- 同一个版本第一次 `create_table_version` 成功
+- 第二次再创建同一个版本会失败
+
+这说明 namespace 在 managed versioning 模式下，确实承担了 **版本发布冲突检测**。
+
+但注意：
+
+> 它检测的是“版本发布冲突”，不是“业务数据自动合并”。
+
+---
+
+## 3. 读表时，namespace 到底做了什么
+
+## 3.1 读路径角色
+
+在读路径里，`namespace` 的角色很明确：
+
+1. **表定位器**
+   - `table_id -> table_uri / location`
+2. **存储参数提供者**
+   - 返回 `storage_options`
+3. **版本策略提供者**
+   - 通过 `managed_versioning` 告诉 Lance：版本查询和版本提交是否要走 namespace
+4. **动态 credential 刷新入口**
+   - 如果 namespace 下发的是临时凭证，后续可以继续通过 provider 刷新
+
+---
+
+## 3.2 读路径图
 
 ```mermaid
 flowchart TD
-    A[Caller invokes lance.dataset(namespace_client, table_id)] --> B[Validate: either uri OR namespace_client+table_id]
-    B --> C[Build DescribeTableRequest]
-    C --> D[namespace_client.describe_table(request)]
-    D --> E[Response: location + storage_options + managed_versioning]
-    E --> F[Merge namespace storage_options with user storage_options]
-    F --> G[Create LanceDataset/_Dataset]
-    G --> H[Attach dynamic storage options provider in Rust]
-    H --> I[Read scans / file access]
-    I --> J[Refresh credentials when needed]
+    A[调用方传入 table_id] --> B[namespace 描述表]
+    B --> C[返回表位置]
+    B --> D[返回存储参数]
+    B --> E[返回版本策略]
+    C --> F[构建 dataset]
+    D --> F
+    E --> F
+    F --> G[后续读数据]
 ```
-
-### What exactly is fetched from namespace
-
-`lance.dataset(...)` calls:
-
-```python
-request = DescribeTableRequest(id=table_id, version=version)
-response = namespace_client.describe_table(request)
-```
-
-Then it reads:
-
-- `response.location`
-- `response.storage_options`
-- `response.managed_versioning`
-
-and uses them to construct the dataset.
-
-Source:
-
-- `_lance_src_v6.0.0/python/python/lance/__init__.py#L203-L233`
-
-### What `managed_versioning` changes
-
-If namespace returns `managed_versioning=True`, dataset version lookup follows namespace version APIs instead of relying only on native Lance version discovery.
-
-Observed behavior in tests:
-
-- opening latest version triggers `list_table_versions`
-- opening a specific version triggers `describe_table_version`
-
-Source:
-
-- `_lance_src_v6.0.0/python/python/tests/test_namespace_dir.py#L923-L979`
-
-### Why this matters
-
-On the read path, namespace is doing more than metadata lookup.
-It becomes a live source of:
-
-- **table resolution** (`table_id -> location`)
-- **storage connection material** (`storage_options`)
-- **credential refresh behavior** (through the storage options provider)
-- **version-management policy** (`managed_versioning`)
 
 ---
 
-## 3. `write_dataset(...)` vs `write_fragments(...)`
+## 4. `write_dataset` 和 `write_fragments` 的本质区别
 
-This is the most important distinction.
+这个区别很关键。
 
-### `write_dataset(...)`
+### 4.1 `write_dataset(...)`
 
-`write_dataset(...)` can do namespace resolution for you.
+这是高层封装。
 
-If you pass:
+如果你给的是：
 
 - `namespace_client`
 - `table_id`
 
-then it can:
+它可以自己去做：
 
-- call `declare_table()` in `mode="create"`
-- call `describe_table()` in `mode="append"` / `mode="overwrite"`
-- fetch `location`
-- fetch `storage_options`
-- pass managed-versioning context through to commit
+- `declare_table(...)` 或 `describe_table(...)`
+- 自动拿 `location`
+- 自动处理一部分 namespace 对接逻辑
 
-Source:
+所以它更像：
 
-- `_lance_src_v6.0.0/python/python/lance/dataset.py#L6544-L6684`
+> **带 namespace 感知的高层写入口**
 
-### `write_fragments(...)`
+---
 
-`write_fragments(...)` is lower-level.
+### 4.2 `write_fragments(...)`
 
-It **does accept**:
+这是低层接口。
+
+它虽然也接收：
 
 - `namespace_client`
 - `table_id`
 
-but this is **not enough to locate the table by itself**.
+但这俩参数 **不足以单独完成表定位**。
 
-You still need to pass a concrete dataset URI / table URI as `dataset_uri`.
+你还是得先准备好真实的 `table_uri`。
 
-Source:
+所以它更像：
 
-- `_lance_src_v6.0.0/python/python/lance/fragment.py#L1130-L1173`
-
-### The mental model
-
-- `write_dataset(...)` = namespace-aware convenience write path
-- `write_fragments(...)` = low-level fragment materialization path
-
-For `write_fragments(...)`, namespace is mainly there for:
-
-- storage-options provider creation
-- credential refresh
-- keeping namespace/table context attached to low-level file work
-
-It is **not** acting as the automatic `table_id -> table_uri` resolver in that API.
+> **分布式写协议里的“生成 fragment”阶段接口**
 
 ---
 
-## 4. How `write_fragments(...)` should be used with namespace
+## 5. 你问的 1：哪些冲突它能检测出来？
 
-## 4.1 CREATE / distributed-first-write path
+这里的“它”，要拆成两层：
 
-Typical pattern:
+- Lance commit 层
+- namespace version 层
 
-1. call `namespace.declare_table(...)`
-2. get `response.location`
-3. merge `response.storage_options`
-4. call `write_fragments(..., table_uri, namespace_client=..., table_id=...)`
-5. build an operation / transaction
-6. call `LanceDataset.commit(...)`
+### 5.1 能检测的冲突
 
-### Call-flow diagram
+#### 一类：基于旧版本提交
+
+如果一个写任务基于旧快照 / 旧版本做提交，而期间已经有别的提交成功推进了版本，那么后来的提交会变成 stale commit。
+
+这类冲突系统是能检测的。
+
+典型表现是：
+
+- 读到的版本已经落后
+- 目标版本号已被占用
+- commit 时发现版本不匹配
+
+---
+
+#### 二类：同一个新版本被重复发布
+
+当 `managed_versioning=True` 时，namespace 的 `create_table_version` 会检查目标版本是否已经存在。
+
+如果版本已经存在，再创建一次就会失败。
+
+这本质上是：
+
+> **版本发布冲突检测**
+
+---
+
+#### 三类：并发提交导致的 manifest 发布冲突
+
+不管是原生 Lance 提交层，还是 namespace 管理的 external manifest 路径，最终都要把一个新 manifest 作为“新版本”发布出去。
+
+只要两个提交试图竞争同一个版本推进点，就会发生冲突检测。
+
+---
+
+#### 四类：乐观并发控制相关冲突
+
+namespace 的 table version 模型里包含 `e_tag` 等字段，用于 optimistic concurrency control。
+
+所以在支持这套语义的后端里，冲突可以细化到：
+
+- 当前对象是否还是你以为的那个对象
+- 发布期间底层对象是否已经变化
+
+---
+
+## 6. 你问的 2：哪些冲突它不会自动帮你解决？
+
+这个地方最容易误解。
+
+### 6.1 业务语义冲突
+
+例如：
+
+- 两个作业同时写同一批业务主键
+- 两个作业都在更新同一批 row
+- 一个作业 append，另一个作业 overwrite
+- 两个作业都认为自己应该成为“最新正确结果”
+
+这种冲突，Lance / namespace **不会自动替你做业务判定**。
+
+它不会知道：
+
+- 谁应该赢
+- 需不需要 merge
+- 需不需要去重
+- 哪些行应该覆盖哪些行
+
+---
+
+### 6.2 分片重复写
+
+如果多个 DN 因为调度问题写了重复的数据分片，只要这些 fragment 在物理上是合法的，commit 层不一定知道这是“业务上的重复”。
+
+它只负责：
+
+- 文件和 manifest 是否有效
+- 版本提交是否合法
+
+它不负责：
+
+- 你的数据是不是重复了
+
+---
+
+### 6.3 幂等和重试语义
+
+如果 worker 重试导致重复生成 fragment，或者 coordinator 在未知提交状态下重复发起 commit，系统只能帮你检测一部分版本冲突。
+
+但更高层的：
+
+- 请求去重
+- task id 幂等
+- 结果回收
+- orphan fragment 清理
+
+仍然要你在业务层设计。
+
+---
+
+## 7. 你问的 3：CN / DN 模式下推荐怎么处理冲突？
+
+## 7.1 推荐心智模型
+
+把这套东西理解成：
+
+- **DN 负责产出 fragment 文件**
+- **CN 负责收口成一个新版本**
+- **冲突主要收敛到 CN commit 这一跳**
+
+这就是它的价值。
+
+它不是让所有节点都直接改同一份版本元数据，而是把最终冲突集中到一个提交点。
+
+---
+
+## 7.2 推荐流程
+
+### 第一步：CN 先拿表上下文
+
+CN 通过 `declare_table(...)` 或 `describe_table(...)` 获取：
+
+- `table_uri`
+- `storage_options`
+- `managed_versioning`
+- 当前版本视图（如果你的业务需要）
+
+---
+
+### 第二步：CN 切分任务给 DN
+
+CN 把这些信息下发给 DN：
+
+- `table_uri`
+- `table_id`
+- 必要的 `storage_options`
+- 本次写入任务标识
+
+注意：
+
+> DN 不应该自己再去猜表位置。
+
+CN 先解析清楚，再统一下发，最稳。
+
+---
+
+### 第三步：DN 只写 fragment，不碰最终提交
+
+DN 执行：
+
+- `write_fragments(...)`
+
+然后把产物返回给 CN。
+
+这样 DN 与 DN 之间通常不会在版本元数据层面直接打架。
+
+---
+
+### 第四步：CN 统一 commit
+
+CN 收集所有 fragment 后，构造：
+
+- `Append`
+- `Overwrite`
+- 或事务对象
+
+然后统一 `commit`。
+
+这一步才是真正可能发生版本冲突的地方。
+
+---
+
+### 第五步：commit 冲突处理策略
+
+推荐这样处理：
+
+#### 策略 A：fail fast
+
+适合：
+
+- 强一致任务
+- 不希望自动重放
+- 业务上需要人工判断冲突
+
+做法：
+
+- 冲突直接失败
+- 重新读最新状态
+- 人或上层调度器决定是否重做
+
+#### 策略 B：自动重试
+
+适合：
+
+- append 型任务
+- 业务幂等性较强
+- 允许短时间竞争
+
+做法：
+
+- 重新拿最新版本视图
+- 必要时重新生成 operation
+- 再 commit 一次
+
+#### 策略 C：业务层 rebase
+
+适合：
+
+- 有主键语义
+- 有 merge 规则
+- overwrite / upsert 语义复杂
+
+做法：
+
+- 先读最新数据
+- 在业务层决定怎样合并
+- 重新生成 fragment / transaction
+- 再提交
+
+---
+
+## 7.3 推荐流程图
 
 ```mermaid
 flowchart TD
-    A[Worker / coordinator wants distributed write] --> B[namespace.declare_table(table_id)]
-    B --> C[Response: location + storage_options + managed_versioning]
-    C --> D[Coordinator chooses concrete table_uri = response.location]
-    D --> E[Workers call write_fragments(data, table_uri, namespace_client, table_id)]
-    E --> F[FragmentMetadata or Transaction returned]
-    F --> G[Coordinator builds LanceOperation / collects Transaction]
-    G --> H[LanceDataset.commit(table_uri, operation, namespace_client, table_id, namespace_client_managed_versioning)]
-    H --> I[Namespace-aware version commit path]
-```
-
-### Real upstream test pattern
-
-The upstream integration test does exactly this:
-
-1. `DeclareTableRequest(id=table_id, location=None)`
-2. `response = ns_client.declare_table(request)`
-3. `table_uri = response.location`
-4. `merged_options = base_storage_options + response.storage_options`
-5. multiple `write_fragments(..., table_uri, namespace_client=ns_client, table_id=table_id)`
-6. `LanceDataset.commit(table_uri, operation, ..., namespace_client=ns_client, table_id=table_id)`
-
-Source:
-
-- `_lance_src_v6.0.0/python/python/tests/test_namespace_integration.py#L563-L650`
-
----
-
-## 4.2 APPEND / OVERWRITE path
-
-For existing tables, the pattern is similar except you usually start from `describe_table(...)` instead of `declare_table(...)`.
-
-1. `describe_table(id=table_id)`
-2. get `location`
-3. merge returned `storage_options`
-4. call `write_fragments(...)` against that `table_uri`
-5. commit the generated operation / transaction
-
----
-
-## 5. Why `write_fragments(...)` still accepts `namespace_client`
-
-At first glance this looks odd: if you already have `table_uri`, why pass namespace again?
-
-Because low-level read/write/file paths can still benefit from namespace-based storage refresh.
-
-The code comments explicitly say the storage options provider is created automatically when `namespace_client` and `table_id` are provided.
-
-Related source points:
-
-- `_lance_src_v6.0.0/python/python/lance/fragment.py#L1130-L1138`
-- `_lance_src_v6.0.0/python/python/lance/dataset.py#L6577-L6684`
-- `_lance_src_v6.0.0/python/python/lance/dataset.py#L3960-L4125`
-
-So the meaning is:
-
-- `table_uri` tells Lance **where** to write/read
-- `namespace_client + table_id` tells Lance **how to keep access valid over time** and **how versioning should be handled**
-
----
-
-## 6. Minimal examples
-
-## 6.1 Reading through namespace
-
-```python
-import lance
-from lance_namespace import connect
-
-ns = connect("rest", {"uri": "http://localhost:4099"})
-
-ds = lance.dataset(
-    namespace_client=ns,
-    table_id=["workspace", "my_table"],
-)
-
-print(ds.version)
-print(ds.count_rows())
-print(ds.to_table())
-```
-
-## 6.2 Distributed write with `write_fragments(...)`
-
-```python
-import lance
-import pyarrow as pa
-from lance.fragment import write_fragments
-from lance_namespace import connect, DeclareTableRequest
-
-ns = connect("rest", {"uri": "http://localhost:4099"})
-table_id = ["workspace", "my_table"]
-
-# Step 1: declare table and get real URI
-resp = ns.declare_table(DeclareTableRequest(id=table_id, location=None))
-table_uri = resp.location
-managed = (resp.managed_versioning is True)
-
-# Step 2: merge storage options
-merged_options = {}
-if resp.storage_options:
-    merged_options.update(resp.storage_options)
-
-# Step 3: workers write fragments
-frag_a = write_fragments(
-    pa.Table.from_pylist([{"a": 1}, {"a": 2}]),
-    table_uri,
-    storage_options=merged_options,
-    namespace_client=ns,
-    table_id=table_id,
-)
-frag_b = write_fragments(
-    pa.Table.from_pylist([{"a": 3}, {"a": 4}]),
-    table_uri,
-    storage_options=merged_options,
-    namespace_client=ns,
-    table_id=table_id,
-)
-
-# Step 4: commit collected fragments
-op = lance.LanceOperation.Overwrite(pa.schema([("a", pa.int64())]), frag_a + frag_b)
-
-ds = lance.LanceDataset.commit(
-    table_uri,
-    op,
-    storage_options=merged_options,
-    namespace_client=ns,
-    table_id=table_id,
-    namespace_client_managed_versioning=managed,
-)
+    A[CN 获取表上下文] --> B[CN 切分写任务]
+    B --> C1[DN1 写 fragment]
+    B --> C2[DN2 写 fragment]
+    B --> C3[DN3 写 fragment]
+    C1 --> D[CN 收集 fragment]
+    C2 --> D
+    C3 --> D
+    D --> E[CN 发起 commit]
+    E --> F{是否冲突}
+    F -->|否| G[提交成功]
+    F -->|是| H[读取最新状态]
+    H --> I{选择策略}
+    I -->|快速失败| J[结束并上报]
+    I -->|自动重试| K[重建提交再试]
+    I -->|业务重算| L[业务层合并后再提]
 ```
 
 ---
 
-## 7. Common mistakes
+## 8. `examples/distributed_write_with_namespace.py` 应该怎么理解
 
-### Mistake 1: expecting `write_fragments(...)` to resolve table URI from namespace
+这个例子不是“真实多机系统”，但它在语义上就是：
 
-This does **not** work conceptually:
+- **CN**：
+  - `declare_table(...)`
+  - 解析 `table_uri`
+  - 收集 fragment
+  - 最后 `commit`
+- **DN**：
+  - `write_fragments(...)`
 
-```python
-write_fragments(data, namespace_client=ns, table_id=table_id)
-```
+所以如果你脑子里想的是：
 
-Why: `write_fragments(...)` still requires the dataset URI / table URI argument.
+> 一个 CN 负责规划，多个 DN 负责写，最后 CN 提交
 
-### Mistake 2: passing both `uri` and `namespace_client + table_id` to `lance.dataset(...)`
-
-The code explicitly rejects this.
-
-### Mistake 3: ignoring namespace-returned storage options
-
-If namespace vends storage options (especially temporary credentials), you should merge them into the options used for reads/writes.
-
-### Mistake 4: forgetting managed versioning during commit
-
-If namespace indicates `managed_versioning=True`, keep that context flowing into commit paths.
+那这个例子就是在**简化模拟这个协议**，你的理解没跑偏。
 
 ---
 
-## 8. Precise source map
+## 9. 为什么之前的 Mermaid 在 GitHub 没渲染出来
 
-### `lance-namespace` contract layer
+大概率不是 Mermaid 块本身没包对，而是 **节点文本太复杂**。
 
-- alias mapping and `connect()`:
-  - `_lance_namespace_src_v0.7.6/python/lance_namespace/lance_namespace/__init__.py#L1086-L1173`
-- error model:
-  - `_lance_namespace_src_v0.7.6/python/lance_namespace/lance_namespace/errors.py#L43-L160`
+GitHub 的 Mermaid 渲染经常对这些内容更敏感：
 
-### Python implementations in `pylance`
+- 太长的函数签名
+- 节点里塞很多括号和逗号
+- 节点里混很多斜杠、下划线、引号
+- 一行里塞太多说明文字
 
-- `DirectoryNamespace`:
-  - `_lance_src_v6.0.0/python/python/lance/namespace.py#L253-L445`
-- `RestNamespace`:
-  - `_lance_src_v6.0.0/python/python/lance/namespace.py#L854-L990`
-- `DynamicContextProvider` and provider construction:
-  - `_lance_src_v6.0.0/python/python/lance/namespace.py#L120-L220`
-- `RestAdapter`:
-  - `_lance_src_v6.0.0/python/python/lance/namespace.py#L1444-L1485`
+所以这次我做了这些调整：
 
-### Read path
+1. 节点文本改短
+2. 节点里不用完整函数签名
+3. 复杂解释移到图外正文
+4. 图里只保留流程骨架
 
-- `lance.dataset(...)` namespace flow:
-  - `_lance_src_v6.0.0/python/python/lance/__init__.py#L90-L239`
-- dataset credential refresh hooks / file-session handoff:
-  - `_lance_src_v6.0.0/python/python/lance/dataset.py#L582-L624`
-  - `_lance_src_v6.0.0/python/python/lance/dataset.py#L2618-L2669`
-
-### Write path
-
-- namespace-aware write path in `write_dataset(...)`:
-  - `_lance_src_v6.0.0/python/python/lance/dataset.py#L6544-L6684`
-- commit path carrying namespace context:
-  - `_lance_src_v6.0.0/python/python/lance/dataset.py#L3960-L4125`
-- low-level `write_fragments(...)` namespace parameters:
-  - `_lance_src_v6.0.0/python/python/lance/fragment.py#L1080-L1173`
-
-### Tests
-
-- managed versioning + read behavior:
-  - `_lance_src_v6.0.0/python/python/tests/test_namespace_dir.py#L910-L979`
-- distributed write pattern using `declare_table -> write_fragments -> commit`:
-  - `_lance_src_v6.0.0/python/python/tests/test_namespace_integration.py#L563-L650`
+这样在 GitHub 上一般更稳。
 
 ---
 
-## 9. Final takeaway
+## 10. 相关源码定位
 
-If you want one sentence to keep in your head:
+下面这些文件是这次结论最关键的依据：
 
-> **`lance.dataset(...)` can ask namespace where the table is; `write_fragments(...)` cannot — it needs the real URI first, and uses namespace mainly to keep credentials/versioning context attached.**
+- `/root/.openclaw/workspace/_lance_src_v6.0.0/python/python/lance/__init__.py`
+  - `lance.dataset(...)` 通过 `describe_table(...)` 解析 `location`、`storage_options`、`managed_versioning`
+- `/root/.openclaw/workspace/_lance_src_v6.0.0/python/python/lance/dataset.py`
+  - `LanceDataset.commit(...)` 把 `namespace_client`、`table_id`、`namespace_client_managed_versioning` 继续传下去
+  - 非 `Overwrite` / `Restore` 操作要求 `read_version`
+- `/root/.openclaw/workspace/_lance_src_v6.0.0/python/python/lance/fragment.py`
+  - `write_fragments(...)` 仍要求显式给出 `dataset_uri` / `table_uri`
+- `/root/.openclaw/workspace/_lance_src_v6.0.0/python/python/tests/test_namespace_integration.py`
+  - 上游分布式写测试模式：`declare_table -> write_fragments x N -> commit`
+- `/root/.openclaw/workspace/_lance_src_v6.0.0/python/python/tests/test_namespace_dir.py`
+  - `managed_versioning=True` 时，读 latest 会走 `list_table_versions`
+  - 读指定 version 会走 `describe_table_version`
+  - create / append 提交会走 `create_table_version`
+- `/root/.openclaw/workspace/_lance_src_v6.0.0/rust/lance/src/dataset/builder.rs`
+  - 读表时根据 `managed_versioning` 安装 external manifest commit handler
+- `/root/.openclaw/workspace/_lance_src_v6.0.0/rust/lance-namespace/src/namespace.rs`
+  - `create_table_version(...)` / `describe_table_version(...)` / `list_table_versions(...)` 的抽象接口定义
+- `/root/.openclaw/workspace/_lance_src_v6.0.0/rust/lance-namespace-impls/src/dir.rs`
+  - `DirectoryNamespace` 的 managed versioning 实现与冲突测试
+- `/root/.openclaw/workspace/_lance_src_v6.0.0/rust/lance-core/src/error.rs`
+  - `Commit conflict for version ...` 错误语义
+- `/root/.openclaw/workspace/_lance_namespace_src_v0.7.6/python/lance_namespace/lance_namespace/errors.py`
+  - `CONCURRENT_MODIFICATION` 等 namespace 错误码
+
+---
+
+## 11. 最后压一句结论
+
+### 关于“commit 冲突是不是由 namespace 处理”
+
+最准确的一句话是：
+
+> **当 `managed_versioning=True` 时，commit 阶段的版本发布冲突主要由 namespace 版本接口处理；当它没开时，冲突仍由 Lance 原生提交层处理。**
+
+### 关于 `write_fragments(...)`
+
+最准确的一句话是：
+
+> **它是更接近分布式写协议的低层接口，不负责自动找表，负责的是在明确 `table_uri` 之后产出 fragment，并把最终冲突收敛到 CN commit。**

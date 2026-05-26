@@ -1,8 +1,8 @@
 import lance
 from lance_namespace import connect
 
-# Example only.
-# Replace with your real namespace implementation and properties.
+# 仅用于演示。
+# 请替换成你自己的 namespace 实现和连接参数。
 ns = connect("rest", {"uri": "http://localhost:4099"})
 
 table_id = ["workspace", "my_table"]
@@ -10,7 +10,7 @@ table_id = ["workspace", "my_table"]
 ds = lance.dataset(
     namespace_client=ns,
     table_id=table_id,
-    # storage_options={...},  # optional; namespace-returned options win on conflicts
+    # storage_options={...},  # 可选；若与 namespace 返回值冲突，通常以后者为准
 )
 
 print("version:", ds.version)
