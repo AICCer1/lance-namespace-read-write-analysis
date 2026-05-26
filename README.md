@@ -15,6 +15,7 @@
 
 - `docs/namespace-read-write-fragments.md`：主分析文档
 - `docs/managed-versioning-how-it-works.md`：专讲 `managed_versioning` 什么时候生效、怎么传递、写路径怎么用
+- `docs/namespace-create-update-index.md`：专讲 `create / update / index` 怎么和 namespace 结合
 - `examples/read_with_namespace.py`：通过 `namespace` 读表的最小示例
 - `examples/distributed_write_with_namespace.py`：`CN 规划 -> 多个 DN 写 fragment -> CN commit` 的简化示例
 - `examples/write_dataset_with_managed_versioning.py`：高层 `write_dataset(...)` 写路径示例
