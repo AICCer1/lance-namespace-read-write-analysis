@@ -33,6 +33,7 @@
 - `examples/update_with_namespace.py`：通过 namespace 打开 dataset 后做 `update / delete / merge_insert` 的最小示例
 - `examples/create_index_with_namespace.py`：`ds.create_index(...)` 与 `ns.create_table_index(...)` 的对照示例
 - `examples/external_manifest_commit_handler_boundary.py`：专门验证 external manifest / `create_table_version(...)` 的保护边界：一个没防住的 stale append case，一个能防住的 duplicate version publish case
+- `tests/test_external_manifest_commit_handler_boundary.py`：上面这个边界分析对应的 pytest 测试脚本，可直接本地跑
 
 ## 先给结论
 
