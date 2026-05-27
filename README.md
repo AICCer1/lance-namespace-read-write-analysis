@@ -15,6 +15,7 @@
 
 - `docs/namespace-read-write-fragments.md`：主分析文档
 - `docs/managed-versioning-how-it-works.md`：专讲 `managed_versioning` 什么时候生效、怎么传递、写路径怎么用
+- `docs/namespace-low-level-write-fragments-commit-flow.md`：专讲从 `connect(...)` 到 `dataset(...)`、再到 `write_fragments(...) + commit(...)` 的低层 namespace 透传链路、参数作用与底层 API 命中路径
 - `docs/namespace-create-update-index.md`：专讲 `create / update / index` 怎么和 namespace 结合
 - `docs/namespace-native-vs-dataset-api.md`：专讲 namespace 原生 API 与“先打开 dataset 再走 Lance API”的区别
 - `docs/directory-namespace-conflict-detection.md`：专讲 `DirectoryNamespace` 的 `put_if_not_exists` 能检测什么、不能检测什么，以及 append / overwrite / restore 的冲突语义
