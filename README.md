@@ -18,6 +18,7 @@
 - `docs/namespace-create-update-index.md`：专讲 `create / update / index` 怎么和 namespace 结合
 - `docs/namespace-native-vs-dataset-api.md`：专讲 namespace 原生 API 与“先打开 dataset 再走 Lance API”的区别
 - `docs/directory-namespace-conflict-detection.md`：专讲 `DirectoryNamespace` 的 `put_if_not_exists` 能检测什么、不能检测什么，以及 append / overwrite / restore 的冲突语义
+- `docs/namespace-conflict-scope.md`：统一讲 namespace 能解决哪些冲突、完整事务冲突矩阵怎么读、先后提交顺序会怎样，以及这些语义在接入 namespace 后是否变化
 - `examples/read_with_namespace.py`：通过 `namespace` 读表的最小示例
 - `examples/distributed_write_with_namespace.py`：`CN 规划 -> 多个 DN 写 fragment -> CN commit` 的简化示例
 - `examples/write_dataset_with_managed_versioning.py`：高层 `write_dataset(...)` 写路径示例
