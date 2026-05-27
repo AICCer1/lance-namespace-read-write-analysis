@@ -19,6 +19,7 @@
 - `docs/namespace-create-update-index.md`：专讲 `create / update / index` 怎么和 namespace 结合
 - `docs/namespace-interface-survey.md`：系统盘点哪些 Lance 接口能接 namespace、怎么接、哪些适合作为项目改造主路线
 - `docs/namespace-retrofit-checklist.md`：把一个现有 Lance 项目整体改造成 namespace 接入时，应该怎么分阶段改、哪里只是加字段、哪里需要协议级改造
+- `docs/external-manifest-commit-handler-boundary.md`：专讲 `ExternalManifestCommitHandler` / `create_table_version(...)` 在 namespace-managed commit 里到底防什么、不防什么，并配了针对性实验
 - `docs/namespace-native-vs-dataset-api.md`：专讲 namespace 原生 API 与“先打开 dataset 再走 Lance API”的区别
 - `docs/directory-namespace-conflict-detection.md`：专讲 `DirectoryNamespace` 的 `put_if_not_exists` 能检测什么、不能检测什么，以及 append / overwrite / restore 的冲突语义
 - `docs/namespace-conflict-scope.md`：统一讲 namespace 能解决哪些冲突、完整事务冲突矩阵怎么读、先后提交顺序会怎样，以及这些语义在接入 namespace 后是否变化
@@ -31,6 +32,7 @@
 - `examples/create_table_with_namespace.py`：`create` 场景下，高层 Lance 写法和 namespace 原生 `create_table(...)` 对照示例
 - `examples/update_with_namespace.py`：通过 namespace 打开 dataset 后做 `update / delete / merge_insert` 的最小示例
 - `examples/create_index_with_namespace.py`：`ds.create_index(...)` 与 `ns.create_table_index(...)` 的对照示例
+- `examples/external_manifest_commit_handler_boundary.py`：专门验证 external manifest / `create_table_version(...)` 的保护边界：一个没防住的 stale append case，一个能防住的 duplicate version publish case
 
 ## 先给结论
 
