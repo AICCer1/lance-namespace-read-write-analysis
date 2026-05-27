@@ -285,6 +285,90 @@ base = lance.dataset(
 
 - `python/src/dataset.rs:777-804`
 
+### 6.2.1 如果是在 DN 上打开 `LanceDataset`，它怎么知道 `managed_versioning=True`
+
+这里最容易误解。
+
+答案不是：
+
+- DN 上的 `LanceDataset` 会自己从 `table_uri` 推导出 `managed_versioning=True`
+
+而是：
+
+- **只要 DN 也是通过 `lance.dataset(namespace_client=ns, table_id=table_id)` 打开的**，它就会像 CN 一样，先走一次 `describe_table(...)`，然后直接从 namespace 响应里取：
+
+```python
+namespace_client_managed_versioning = (
+    getattr(response, "managed_versioning", None) is True
+)
+```
+
+也就是说，DN 本地这个布尔值的来源仍然是：
+
+- `describe_table(...)` 响应
+- 不是 `LanceDataset` 自己从 URI 反推
+- 也不是 `write_fragments(...)` 阶段自动帮你补出来
+
+然后 Python 层会把这个值继续传给 `LanceDataset(...)`，再由 `LanceDataset.__init__` 保存在：
+
+- `self._namespace_client_managed_versioning`
+
+对应位置：
+
+- Python 读值并传入：`python/python/lance/__init__.py:204-255`
+- Python 对象保存字段：`python/python/lance/dataset.py:602-625`
+- Rust builder 根据该布尔值装 handler：`python/src/dataset.rs:777-804`
+
+所以结论很明确：
+
+> **DN 如果自己 open dataset，它知道 `managed_versioning=True` 的方式，仍然是“自己再问一次 namespace”。**
+
+不是靠别的隐式魔法。
+
+### 6.2.2 这个值不会可靠地跟着 `LanceDataset` 跨进程传播
+
+这点对 CN / DN 架构非常关键。
+
+如果只是同进程 `copy.copy(ds)`：
+
+- `_namespace_client`
+- `_table_id`
+- `_namespace_client_managed_versioning`
+
+是会保留的。
+
+对应位置：
+
+- `python/python/lance/dataset.py:702-715`
+
+但如果是序列化 / pickle / 跨进程恢复，`__setstate__` 会把这些字段清掉：
+
+```python
+self._namespace_client = None
+self._table_id = None
+self._namespace_client_managed_versioning = False
+```
+
+对应位置：
+
+- `python/python/lance/dataset.py:651-700`
+
+所以不能假设：
+
+> **CN 打开的 `LanceDataset` 对象传到 DN 之后，DN 还能天然保有 `managed_versioning=True`。**
+
+这个假设不稳。
+
+对分布式链路，应该显式传的是：
+
+- `table_uri`
+- `storage_options`
+- `table_id`
+- `managed_versioning`
+- `read_version`
+
+而不是把 `LanceDataset` 对象本身当成 control-plane 上下文载体。
+
 ### 6.3 这一步命中的 namespace API
 
 如果你打开 latest：
@@ -614,6 +698,45 @@ new_ds = lance.LanceDataset.commit(
 - 但最后 commit 可能没切到 namespace-backed version publish
 
 也就是“前半段走了 namespace，最后一跳又掉回别的路径”。
+
+尤其要注意：
+
+- 就算 `base = lance.dataset(namespace_client=ns, table_id=table_id)` 这个 `base` 对象里已经有 `_namespace_client_managed_versioning=True`
+- 你后面如果调用 `LanceDataset.commit(...)`
+- 也**不会自动**从 `base` 身上把这个布尔值继承出来
+
+`commit(...)` 真正会自动继承的，基本只有：
+
+- `base_store_params`
+
+而不是：
+
+- `_namespace_client`
+- `_table_id`
+- `_namespace_client_managed_versioning`
+
+对应位置：
+
+- 只继承 `base_store_params`：`python/python/lance/dataset.py:3929-3935`
+- `base_uri` 若是 `LanceDataset`，只取 `base_uri._ds`：`python/python/lance/dataset.py:4066-4077`
+- 最终仍以显式传入参数为准：`python/python/lance/dataset.py:4106-4146`
+- Rust 侧只有在 `namespace_client_managed_versioning=True` 且有 `namespace_client + table_id` 时才装 handler：`python/src/dataset.rs:2590-2610`
+
+所以对最终 commit，正确姿势仍然是显式写：
+
+```python
+LanceDataset.commit(
+    table_uri,
+    op,
+    read_version=read_version,
+    storage_options=storage_options,
+    namespace_client=ns,
+    table_id=table_id,
+    namespace_client_managed_versioning=managed,
+)
+```
+
+不要赌它会从某个先前打开过的 `LanceDataset` 对象里自动把这个状态带出来。
 
 ---
 
