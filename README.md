@@ -23,6 +23,7 @@
 - `examples/distributed_write_with_namespace.py`：`CN 规划 -> 多个 DN 写 fragment -> CN commit` 的简化示例
 - `examples/write_dataset_with_managed_versioning.py`：高层 `write_dataset(...)` 写路径示例
 - `examples/write_fragments_append_with_managed_versioning.py`：低层 `write_fragments + commit` 写路径示例
+- `examples/probe_namespace_managed_versioning.py`：穿刺验证是否真的走了 namespace-backed version path（`list_table_versions` / `describe_table_version` / `create_table_version`）
 - `examples/directory_namespace_conflict_matrix.py`：用 stale writer 方式演示 append / overwrite / restore 的冲突矩阵
 - `examples/create_table_with_namespace.py`：`create` 场景下，高层 Lance 写法和 namespace 原生 `create_table(...)` 对照示例
 - `examples/update_with_namespace.py`：通过 namespace 打开 dataset 后做 `update / delete / merge_insert` 的最小示例
