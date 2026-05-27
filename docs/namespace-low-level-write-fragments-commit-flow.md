@@ -327,7 +327,19 @@ namespace_client_managed_versioning = (
 
 ### 6.2.2 这个值不会可靠地跟着 `LanceDataset` 跨进程传播
 
-这点对 CN / DN 架构非常关键。
+先把话说直白一点：
+
+> **这里不是推荐 CN 把 `LanceDataset` 对象传给 DN。**
+> **更推荐的做法是：DN 自己打开，或者 DN 根本不需要打开。**
+
+这里说的“跨进程传播”，指的是 Python 对象跨了进程边界，例如：
+
+- `multiprocessing`
+- `ProcessPoolExecutor`
+- worker queue / pipe
+- Ray / actor / remote worker
+
+这类场景里，Python 往往会先把对象做一次序列化（pickle），另一边再反序列化恢复。
 
 如果只是同进程 `copy.copy(ds)`：
 
@@ -341,7 +353,7 @@ namespace_client_managed_versioning = (
 
 - `python/python/lance/dataset.py:702-715`
 
-但如果是序列化 / pickle / 跨进程恢复，`__setstate__` 会把这些字段清掉：
+但如果是序列化 / pickle / 跨进程恢复，`__setstate__` 恢复对象时会把这些 namespace 相关字段重置掉：
 
 ```python
 self._namespace_client = None
@@ -353,13 +365,63 @@ self._namespace_client_managed_versioning = False
 
 - `python/python/lance/dataset.py:651-700`
 
-所以不能假设：
+所以这段真正想表达的是：
 
-> **CN 打开的 `LanceDataset` 对象传到 DN 之后，DN 还能天然保有 `managed_versioning=True`。**
+> **不要把 `LanceDataset` 对象本身当成跨 worker / 跨 DN 的 control-plane 上下文载体。**
 
-这个假设不稳。
+不是说“CN 一定会把 dataset 传给 DN”，而是说：
 
-对分布式链路，应该显式传的是：
+- **如果你这么做，这些 namespace 状态不保证还能保住**
+- 所以这不是稳妥集成方式
+
+对 CN / DN 分工，更推荐下面两种：
+
+### 模式 A：DN 不打开 dataset，只负责 `write_fragments(...)`
+
+这是最常见也最干净的模式。
+
+CN 显式持有：
+
+- `table_uri`
+- `storage_options`
+- `table_id`
+- `managed_versioning`
+- `read_version`
+
+DN 只拿：
+
+- `table_uri`
+- `storage_options`
+- `table_id`
+- 自己的 shard / task 上下文
+
+然后直接：
+
+```python
+write_fragments(..., table_uri, storage_options=..., namespace_client=ns, table_id=table_id)
+```
+
+这种模式下，DN 根本不需要关心 `managed_versioning`。
+
+### 模式 B：DN 自己独立打开 dataset
+
+如果 DN 确实需要 open dataset，也完全可以自己这样开：
+
+```python
+ds = lance.dataset(namespace_client=ns, table_id=table_id)
+```
+
+这时它会像 CN 一样：
+
+1. 自己调一次 `describe_table(...)`
+2. 自己从响应里取 `managed_versioning`
+3. 自己把该值存进本地 `LanceDataset`
+
+也就是说：
+
+> **DN 自己打开是没问题的；不推荐的是“把 CN 打开的 `LanceDataset` 对象直接传给 DN 再指望里面状态还能自动保留”。**
+
+所以对分布式链路，应该显式传的是：
 
 - `table_uri`
 - `storage_options`
