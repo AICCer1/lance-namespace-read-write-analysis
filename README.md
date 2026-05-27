@@ -18,6 +18,7 @@
 - `docs/namespace-low-level-write-fragments-commit-flow.md`：专讲从 `connect(...)` 到 `dataset(...)`、再到 `write_fragments(...) + commit(...)` 的低层 namespace 透传链路、参数作用与底层 API 命中路径
 - `docs/namespace-create-update-index.md`：专讲 `create / update / index` 怎么和 namespace 结合
 - `docs/namespace-interface-survey.md`：系统盘点哪些 Lance 接口能接 namespace、怎么接、哪些适合作为项目改造主路线
+- `docs/namespace-retrofit-checklist.md`：把一个现有 Lance 项目整体改造成 namespace 接入时，应该怎么分阶段改、哪里只是加字段、哪里需要协议级改造
 - `docs/namespace-native-vs-dataset-api.md`：专讲 namespace 原生 API 与“先打开 dataset 再走 Lance API”的区别
 - `docs/directory-namespace-conflict-detection.md`：专讲 `DirectoryNamespace` 的 `put_if_not_exists` 能检测什么、不能检测什么，以及 append / overwrite / restore 的冲突语义
 - `docs/namespace-conflict-scope.md`：统一讲 namespace 能解决哪些冲突、完整事务冲突矩阵怎么读、先后提交顺序会怎样，以及这些语义在接入 namespace 后是否变化
