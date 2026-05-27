@@ -386,7 +386,84 @@ external manifest store 的意义，就是把“这次发布 version=N 的胜负
 
 ---
 
-## 11. 最后一句话结论
+## 11. 再补一个你提的关键对比：不用 namespace 时，同一个 version 争抢会怎样
+
+这个问题非常关键，而且答案是：
+
+> **在支持原子条件写的默认 commit handler 上，不用 namespace 时，两个 writer 抢同一个 target version，也应该只有一个成功。**
+
+也就是说：
+
+- `namespace` **不是**“让第二个失败”的唯一来源
+- Lance 默认 commit handler 本来就要保证：
+  - 同一个 next version 只能有一个 winner
+
+官方 commit 抽象本身就写了：
+
+> Commit implementations ensure that if there are multiple concurrent writers attempting to write the next version of a table, only one will win.
+
+对应源码：
+
+- `../_lance_src_v6.0.0/rust/lance-table/src/io/commit.rs`
+
+而默认本地/常见对象存储路径，通常会选：
+
+- `RenameCommitHandler`
+- 或 `ConditionalPutCommitHandler`
+
+它们本质上也是在 final manifest path 上做：
+
+- `rename_if_not_exists`
+- 或 `PutMode::Create`
+
+所以如果你把场景收窄成：
+
+> **两个 writer 都要抢同一个 target version=2，而且禁止 retry/rebase 到 version=3**
+
+那么：
+
+- **不用 namespace**：第二个也应该失败
+- **用了 namespace**：第二个也应该失败
+
+两边的差别不在“是否拦住 duplicate version=2”，而在：
+
+- **不用 namespace**：CAS 点在 object store final manifest path
+- **用了 namespace**：CAS 点在 external manifest / `create_table_version(...)`
+
+换句话说，真正该对比的是：
+
+### 不用 namespace
+
+- 依赖 object store 自己支持足够强的原子条件写
+- 第二个 writer 抢同一个 version，靠默认 commit handler 拦
+
+### 用 namespace + managed_versioning
+
+- 把 CAS 点外提到 namespace / external manifest store
+- 第二个 writer 抢同一个 version，靠 `create_table_version(...)` 拦
+- 这对“不支持原子条件写的 object store”尤其重要
+
+---
+
+## 12. 对应测试脚本现在已经补成 3 个视角
+
+`tests/test_external_manifest_commit_handler_boundary.py` 现在覆盖：
+
+1. **不用 namespace**：两个 writer 都想占同一个 target version=2，第二个失败（通过 `max_retries=0` 固定在 strict 对比语义）
+2. **用 namespace，默认 retry 打开**：stale append -> append 最终可变成 version 2 / version 3，说明它不是 strict read_version CAS
+3. **用 namespace，直接测 `create_table_version(version=2)` 重复发布**：第二个失败，说明 external manifest 这一层确实在 version claim 处做保护
+
+这样就能把：
+
+- “默认 Lance commit handler 已经能防什么”
+- “namespace external manifest 额外把 CAS 点搬到了哪”
+- “它并不等于 strict stale writer 阻断”
+
+这三件事分开看清楚。
+
+---
+
+## 13. 最后一句话结论
 
 如果只用一句话概括：
 

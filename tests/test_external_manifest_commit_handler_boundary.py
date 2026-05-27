@@ -50,17 +50,30 @@ def managed_ns(temp_root):
     )
 
 
+@pytest.fixture
+def plain_dataset_uri(temp_root):
+    return os.path.join(temp_root, "plain-events.lance")
+
+
+def base_table():
+    return pa.Table.from_pylist(
+        [
+            {"id": 1, "name": "base"},
+        ]
+    )
+
+
 def create_base_table(ns, table_id):
     return lance.write_dataset(
-        pa.Table.from_pylist(
-            [
-                {"id": 1, "name": "base"},
-            ]
-        ),
+        base_table(),
         namespace_client=ns,
         table_id=table_id,
         mode="create",
     )
+
+
+def create_base_table_plain(uri):
+    return lance.write_dataset(base_table(), uri)
 
 
 def table_context(ns, table_id):
@@ -100,6 +113,10 @@ def latest_rows(ns, table_id):
     return lance.dataset(namespace_client=ns, table_id=table_id).to_table().to_pylist()
 
 
+def latest_rows_plain(uri):
+    return lance.dataset(uri).to_table().to_pylist()
+
+
 def versions_dir(root: str):
     candidates = []
     for current_root, dirs, files in os.walk(root):
@@ -131,7 +148,51 @@ def copy_as_staging(root: str, src_manifest_abs: str, target_version: int):
     return staging_abs, staging_rel
 
 
-def test_stale_append_then_append_is_not_blocked(managed_ns, temp_root, table_id):
+def commit_append_plain(uri, stale_ds, rows, max_retries=0):
+    op = lance.LanceOperation.Append(
+        write_fragments(pa.Table.from_pylist(rows), uri)
+    )
+    return lance.LanceDataset.commit(
+        uri,
+        op,
+        read_version=stale_ds.version,
+        max_retries=max_retries,
+    )
+
+
+def test_without_namespace_same_target_version_conflict_is_blocked(
+    plain_dataset_uri,
+):
+    create_base_table_plain(plain_dataset_uri)
+
+    writer_a = lance.dataset(plain_dataset_uri)
+    writer_b = lance.dataset(plain_dataset_uri)
+
+    first = commit_append_plain(
+        plain_dataset_uri,
+        writer_a,
+        [{"id": 2, "name": "append-a"}],
+        max_retries=0,
+    )
+    assert first.version == 2
+
+    with pytest.raises(Exception) as exc_info:
+        commit_append_plain(
+            plain_dataset_uri,
+            writer_b,
+            [{"id": 3, "name": "append-b"}],
+            max_retries=0,
+        )
+
+    rows = latest_rows_plain(plain_dataset_uri)
+    names = {row["name"] for row in rows}
+    assert names == {"base", "append-a"}
+    assert str(exc_info.value)
+
+
+def test_stale_append_then_append_is_not_blocked_with_namespace_default_retries(
+    managed_ns, temp_root, table_id
+):
     create_base_table(managed_ns, table_id)
 
     writer_a = lance.dataset(namespace_client=managed_ns, table_id=table_id)
@@ -163,7 +224,9 @@ def test_stale_append_then_append_is_not_blocked(managed_ns, temp_root, table_id
     assert metrics.get("create_table_version", 0) >= 3
 
 
-def test_duplicate_target_version_publish_is_blocked(managed_ns, temp_root, table_id):
+def test_with_namespace_same_target_version_duplicate_publish_is_blocked(
+    managed_ns, temp_root, table_id
+):
     create_base_table(managed_ns, table_id)
 
     base_manifest = latest_final_manifest_path(temp_root)
