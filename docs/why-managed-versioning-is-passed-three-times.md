@@ -540,6 +540,43 @@ namespace_client_managed_versioning=True
 
 这要求 namespace backend 支持 table version API。对 `DirectoryNamespace` 可能仍然有实现，但语义上已经和服务端声明不一致；对某些 namespace 实现，则可能直接 `not supported`。
 
+可以把它理解成下面两条分叉路径：
+
+```mermaid
+flowchart LR
+    subgraph A[正常路径: tracking=false, commit 也传 false]
+        A1[connect / describe_table]
+        A2[managed_versioning = None or False]
+        A3[write_fragments / prepare op]
+        A4[LanceDataset.commit(..., namespace_client_managed_versioning=False)]
+        A5[普通 Lance commit]
+        A6[直接发布 object store manifest]
+        A1 --> A2 --> A3 --> A4 --> A5 --> A6
+    end
+
+    subgraph B[异常路径: tracking=false, 但 commit 强行传 true]
+        B1[connect / describe_table]
+        B2[managed_versioning = None or False]
+        B3[write_fragments / prepare op]
+        B4[LanceDataset.commit(..., namespace_client_managed_versioning=True)]
+        B5[安装 ExternalManifestCommitHandler]
+        B6[调用 list/describe/create_table_version]
+        B7a[DirectoryNamespace: 可能能跑, 但语义与声明不一致]
+        B7b[其他 backend: 可能直接 not supported]
+        B1 --> B2 --> B3 --> B4 --> B5 --> B6
+        B6 --> B7a
+        B6 --> B7b
+    end
+```
+
+这里最容易误解的点是：
+
+> `table_version_tracking_enabled=false` 不是一个 commit 时的硬拦截器，  
+> 它更像 namespace 对外声明的 capability。  
+> 而 `namespace_client_managed_versioning=True` 是你在单次 commit 上手动绕过这份声明。
+
+所以在官方 Python 库里，这种“前面 response 说没开，后面 commit 还硬传 `True`”的行为不会被自动纠正；Lance 会真的走 namespace-managed commit 路径。
+
 所以不要把它当成本地 override。正确做法是：
 
 ```python
