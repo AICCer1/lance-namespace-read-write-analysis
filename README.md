@@ -15,6 +15,7 @@
 
 - `docs/namespace-read-write-fragments.md`：主分析文档
 - `docs/managed-versioning-how-it-works.md`：专讲 `managed_versioning` 什么时候生效、怎么传递、写路径怎么用
+- `docs/why-managed-versioning-is-passed-three-times.md`：专讲为什么 namespace config、dataset runtime、commit API 三处都出现 managed-versioning 相关参数，以及各自的源码边界和传错后果
 - `docs/namespace-low-level-write-fragments-commit-flow.md`：专讲从 `connect(...)` 到 `dataset(...)`、再到 `write_fragments(...) + commit(...)` 的低层 namespace 透传链路、参数作用与底层 API 命中路径
 - `docs/namespace-create-update-index.md`：专讲 `create / update / index` 怎么和 namespace 结合
 - `docs/namespace-interface-survey.md`：系统盘点哪些 Lance 接口能接 namespace、怎么接、哪些适合作为项目改造主路线
