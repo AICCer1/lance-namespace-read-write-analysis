@@ -543,29 +543,25 @@ namespace_client_managed_versioning=True
 可以把它理解成下面两条分叉路径：
 
 ```mermaid
-flowchart LR
-    subgraph A[正常路径: tracking=false, commit 也传 false]
-        A1[connect / describe_table]
-        A2[managed_versioning = None or False]
-        A3[write_fragments / prepare op]
-        A4[LanceDataset.commit(..., namespace_client_managed_versioning=False)]
-        A5[普通 Lance commit]
-        A6[直接发布 object store manifest]
-        A1 --> A2 --> A3 --> A4 --> A5 --> A6
+flowchart TB
+    subgraph Normal["正常路径"]
+        N1["describe_table -> managed_versioning = false"]
+        N2["commit(..., namespace_client_managed_versioning=false)"]
+        N3["普通 Lance commit"]
+        N4["直接发布 object store manifest"]
+        N1 --> N2 --> N3 --> N4
     end
 
-    subgraph B[异常路径: tracking=false, 但 commit 强行传 true]
-        B1[connect / describe_table]
-        B2[managed_versioning = None or False]
-        B3[write_fragments / prepare op]
-        B4[LanceDataset.commit(..., namespace_client_managed_versioning=True)]
-        B5[安装 ExternalManifestCommitHandler]
-        B6[调用 list/describe/create_table_version]
-        B7a[DirectoryNamespace: 可能能跑, 但语义与声明不一致]
-        B7b[其他 backend: 可能直接 not supported]
-        B1 --> B2 --> B3 --> B4 --> B5 --> B6
-        B6 --> B7a
-        B6 --> B7b
+    subgraph Forced["强行传 true"]
+        F1["describe_table -> managed_versioning = false"]
+        F2["commit(..., namespace_client_managed_versioning=true)"]
+        F3["安装 ExternalManifestCommitHandler"]
+        F4["调用 list_table_versions / describe_table_version / create_table_version"]
+        F5["DirectoryNamespace: 可能能跑，但语义和声明不一致"]
+        F6["其他 backend: 可能直接报 not supported"]
+        F1 --> F2 --> F3 --> F4
+        F4 --> F5
+        F4 --> F6
     end
 ```
 
